@@ -1,0 +1,64 @@
+<?php
+// transaction_handler.php
+require_once 'security_handler.php';
+require_once 'finance_queries.php';
+
+class SecureTransactionHandler {
+    private $security;
+    private $queries;
+    
+    public function __construct() {
+        $this->security = new SecurityHandler();
+        $this->queries = new FinanceQueries();
+        
+        // Set security headers
+        $this->security->setSecurityHeaders();
+        // Secure session
+        $this->security->secureSession();
+    }
+    
+    public function handleTransactionRequest() {
+        try {
+            // Validate session and CSRF
+            if (!isset($_SESSION['user_id']) || 
+                !$this->security->validateCSRFToken($_POST['csrf_token'])) {
+                throw new Exception("Invalid session");
+            }
+            
+            // Rate limiting
+            if (!$this->security->checkRateLimit($_SESSION['user_id'], 'add_transaction')) {
+                throw new Exception("Rate limit exceeded");
+            }
+            
+            // Sanitize and validate inputs
+            $amount = $this->security->sanitizeInput($_POST['amount'], 'float');
+            $categoryId = $this->security->sanitizeInput($_POST['category_id'], 'int');
+            $description = $this->security->sanitizeInput($_POST['description'], 'string');
+            $date = $this->security->sanitizeInput($_POST['date'], 'date');
+            $type = $this->security->sanitizeInput($_POST['type'], 'string');
+            
+            if (!$amount || !$categoryId || !$date || !$type) {
+                throw new Exception("Invalid input parameters");
+            }
+            
+            // Process transaction with optimized queries
+            $result = $this->queries->getDetailedTransactions(
+                $_SESSION['user_id'],
+                $date,
+                $date
+            );
+            
+            return ['success' => true, 'data' => $result];
+            
+        } catch (Exception $e) {
+            error_log("Transaction Error: " . $e->getMessage());
+            return ['error' => "Transaction failed"];
+        }
+    }
+}
+
+// Usage example
+$handler = new SecureTransactionHandler();
+header('Content-Type: application/json');
+echo json_encode($handler->handleTransactionRequest());
+?>

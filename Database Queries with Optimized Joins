@@ -1,0 +1,149 @@
+<?php
+class FinanceQueries {
+    private $db;
+
+    public function __construct() {
+        $database = new Database();
+        $this->db = $database->getConnection();
+    }
+
+    // Complex join for detailed transaction report
+    public function getDetailedTransactions($userId, $startDate = null, $endDate = null) {
+        $query = "
+            SELECT 
+                t.transaction_id,
+                t.amount,
+                t.transaction_date,
+                t.description,
+                t.type,
+                c.name AS category_name,
+                c.type AS category_type,
+                b.amount AS budget_amount,
+                COALESCE(
+                    (SELECT SUM(amount) 
+                     FROM transactions 
+                     WHERE category_id = t.category_id 
+                     AND MONTH(transaction_date) = MONTH(t.transaction_date)
+                     AND YEAR(transaction_date) = YEAR(t.transaction_date)
+                    ), 0
+                ) as category_monthly_total
+            FROM transactions t
+            INNER JOIN categories c ON t.category_id = c.category_id
+            LEFT JOIN budgets b ON c.category_id = b.category_id 
+                AND b.start_date <= t.transaction_date 
+                AND b.end_date >= t.transaction_date
+            WHERE t.user_id = :user_id";
+
+        $params = [':user_id' => $userId];
+
+        if ($startDate) {
+            $query .= " AND t.transaction_date >= :start_date";
+            $params[':start_date'] = $startDate;
+        }
+        if ($endDate) {
+            $query .= " AND t.transaction_date <= :end_date";
+            $params[':end_date'] = $endDate;
+        }
+
+        $query .= " ORDER BY t.transaction_date DESC";
+
+        try {
+            $stmt = $this->db->prepare($query);
+            $stmt->execute($params);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch(PDOException $e) {
+            error_log("Query Error: " . $e->getMessage());
+            throw new Exception("Failed to retrieve transactions");
+        }
+    }
+
+    // Budget analysis with multiple joins
+    public function getBudgetAnalysis($userId, $month, $year) {
+        $query = "
+            WITH monthly_totals AS (
+                SELECT 
+                    c.category_id,
+                    COALESCE(SUM(t.amount), 0) as spent_amount
+                FROM categories c
+                LEFT JOIN transactions t ON c.category_id = t.category_id
+                    AND MONTH(t.transaction_date) = :month
+                    AND YEAR(t.transaction_date) = :year
+                WHERE c.user_id = :user_id
+                GROUP BY c.category_id
+            )
+            SELECT 
+                c.category_id,
+                c.name AS category_name,
+                c.type AS category_type,
+                b.amount AS budget_amount,
+                mt.spent_amount,
+                CASE 
+                    WHEN b.amount IS NOT NULL 
+                    THEN ROUND((mt.spent_amount / b.amount) * 100, 2)
+                    ELSE NULL 
+                END as budget_percentage,
+                CASE 
+                    WHEN b.amount IS NOT NULL 
+                    THEN b.amount - mt.spent_amount
+                    ELSE NULL 
+                END as remaining_budget
+            FROM categories c
+            LEFT JOIN budgets b ON c.category_id = b.category_id
+                AND :current_date BETWEEN b.start_date AND b.end_date
+            LEFT JOIN monthly_totals mt ON c.category_id = mt.category_id
+            WHERE c.user_id = :user_id
+            ORDER BY c.type, c.name";
+
+        try {
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([
+                ':user_id' => $userId,
+                ':month' => $month,
+                ':year' => $year,
+                ':current_date' => date('Y-m-d')
+            ]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch(PDOException $e) {
+            error_log("Budget Analysis Error: " . $e->getMessage());
+            throw new Exception("Failed to retrieve budget analysis");
+        }
+    }
+
+    // Trend analysis with aggregated joins
+    public function getMonthlyTrends($userId, $months = 6) {
+        $query = "
+            WITH RECURSIVE date_series AS (
+                SELECT 
+                    DATE_SUB(CURRENT_DATE, INTERVAL :months MONTH) AS date
+                UNION ALL
+                SELECT 
+                    DATE_ADD(date, INTERVAL 1 MONTH)
+                FROM date_series
+                WHERE date < CURRENT_DATE
+            )
+            SELECT 
+                DATE_FORMAT(ds.date, '%Y-%m') as month,
+                COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0) as total_income,
+                COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as total_expenses,
+                COUNT(DISTINCT t.category_id) as categories_used,
+                COALESCE(AVG(t.amount), 0) as avg_transaction_amount
+            FROM date_series ds
+            LEFT JOIN transactions t ON DATE_FORMAT(t.transaction_date, '%Y-%m') = DATE_FORMAT(ds.date, '%Y-%m')
+                AND t.user_id = :user_id
+            GROUP BY DATE_FORMAT(ds.date, '%Y-%m')
+            ORDER BY month DESC";
+
+        try {
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([
+                ':user_id' => $userId,
+                ':months' => $months
+            ]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch(PDOException $e) {
+            error_log("Trend Analysis Error: " . $e->getMessage());
+            throw new Exception("Failed to retrieve trend analysis");
+        }
+    }
+}
+?>
